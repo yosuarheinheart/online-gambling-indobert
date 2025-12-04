@@ -1,4 +1,3 @@
-# app.py — Streamlit app using Hugging Face InferenceClient + full preprocessing
 import os
 import re
 import html
