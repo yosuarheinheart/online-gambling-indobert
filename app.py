@@ -30,6 +30,12 @@ except Exception:
 # ---------------- Config ----------------
 DEFAULT_REPO = "yossss90/indobert_imbalance_1"  # ganti sesuai repo HF Anda
 st.set_page_config(page_title="IndoBERT Classifier (HF API)", layout="centered", initial_sidebar_state="expanded")
+import sys, pkgutil
+st.sidebar.markdown("*Debug info (temporary)*")
+st.sidebar.write("Python:", sys.version.splitlines()[0])
+installed = sorted([m.name for m in pkgutil.iter_modules()])
+st.sidebar.write("matplotlib present:", "matplotlib" in installed)
+st.sidebar.write("sample installed pkgs:", ", ".join(installed[:25]))
 
 # ---------------- Preprocessing utilities (same as your original) ----------------
 FULL_UNICODE_NORMALIZATION_MAP = {
