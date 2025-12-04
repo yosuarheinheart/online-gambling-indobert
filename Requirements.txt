@@ -1,0 +1,8 @@
+streamlit
+transformers
+torch
+safetensors
+huggingface_hub
+pandas
+requests
+matplotlib
