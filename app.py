@@ -414,3 +414,14 @@ st.markdown("---")
 st.write("Notes:")
 st.write("- Preprocessing applied: unicode normalization, HTML/url removal, punctuation cleanup, lowercasing, optional stopword removal & stemming (Sastrawi if installed).")
 st.caption("Developed with ❤️ by Group 4")
+
+# debug-info (sementara - hapus setelah selesai)
+import sys, pkgutil
+import streamlit as st
+st.sidebar.markdown("*Debug info (temp)*")
+st.sidebar.write("Python:", sys.version)
+installed = sorted([m.name for m in pkgutil.iter_modules()])
+# tampilkan apakah matplotlib ada
+st.sidebar.write("matplotlib present:", "matplotlib" in installed)
+# optional: show top 30 installed packages
+st.sidebar.write("Installed pkgs sample:", installed[:30])
