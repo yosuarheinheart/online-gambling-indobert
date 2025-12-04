@@ -13,6 +13,14 @@ import requests
 import matplotlib.pyplot as plt
 
 try:
+    import matplotlib
+    import matplotlib.pyplot as plt
+    _MPL_AVAILABLE = True
+except Exception:
+    plt = None
+    _MPL_AVAILABLE = False
+
+try:
     from Sastrawi.StopWordRemover.StopWordRemoverFactory import StopWordRemoverFactory
     from Sastrawi.Stemmer.StemmerFactory import StemmerFactory
     _SASTRAWI_AVAILABLE = True
