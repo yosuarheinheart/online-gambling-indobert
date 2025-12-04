@@ -3,7 +3,7 @@ streamlit
 transformers
 torch==2.2.2+cpu
 safetensors
-huggingface-hub
+huggingface_hub
 pandas
 requests
 requests

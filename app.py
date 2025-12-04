@@ -26,26 +26,23 @@ try:
 except Exception:
     _SASTRAWI_AVAILABLE = False
 
-# huggingface InferenceClient
-from huggingface_hub import InferenceClient
+# huggingface InferenceClient (preferred way to call HF inference)
+try:
+    from huggingface_hub import InferenceClient
+    _HF_HUB_AVAILABLE = True
+except Exception:
+    InferenceClient = None
+    _HF_HUB_AVAILABLE = False
 
 # ---------------- Config ----------------
 DEFAULT_REPO = "yossss90/indobert_imbalance_1"  # ganti sesuai repo HF Anda
 st.set_page_config(page_title="IndoBERT Classifier (HF API)", layout="centered", initial_sidebar_state="expanded")
 
-# Debug info (temporary) — hapus setelah selesai
-import sys, pkgutil
-st.sidebar.markdown("*Debug info (temporary)*")
-st.sidebar.write("Python:", sys.version.splitlines()[0])
-installed = sorted([m.name for m in pkgutil.iter_modules()])
-st.sidebar.write("matplotlib present:", "matplotlib" in installed)
-st.sidebar.write("sample installed pkgs:", ", ".join(installed[:25]))
-
 # ---------------- Preprocessing utilities ----------------
 FULL_UNICODE_NORMALIZATION_MAP = {
     'Ａ':'A','Ｂ':'B','Ｃ':'C','Ｄ':'D','Ｅ':'E','Ｆ':'F','Ｇ':'G','Ｈ':'H','Ｉ':'I','Ｊ':'J','Ｋ':'K','Ｌ':'L','Ｍ':'M','Ｎ':'N','Ｏ':'O','Ｐ':'P','Ｑ':'Q','Ｒ':'R','Ｓ':'S','Ｔ':'T','Ｕ':'U','Ｖ':'V','Ｗ':'W','Ｘ':'X','Ｙ':'Y','Ｚ':'Z',
     'ａ':'a','ｂ':'b','ｃ':'c','ｄ':'d','ｅ':'e','ｆ':'f','ｇ':'g','ｈ':'h','ｉ':'i','ｊ':'j','ｋ':'k','ｌ':'l','ｍ':'m','ｎ':'n','ｏ':'o','ｐ':'p','𝟎':'0','𝟏':'1','𝟐':'2',
-    # paste lengkap jika Anda punya mapping lebih besar
+    # Lengkapi jika perlu
 }
 
 MULTI_CHAR_NORMALIZATION_MAP = {
@@ -120,7 +117,7 @@ def preprocess_text_full(text: str) -> str:
 # ---------------- HF InferenceClient wrapper ----------------
 @st.cache_resource
 def _init_hf_client(token: Optional[str]):
-    if not token:
+    if not token or not _HF_HUB_AVAILABLE:
         return None
     try:
         return InferenceClient(token=token)
@@ -135,14 +132,15 @@ def call_hf_inference_batch(repo_id: str, inputs: Iterable[str], token: Optional
     Raises RuntimeError on failure.
     """
     client = _init_hf_client(token)
-    # prefer using client if available
     if client is not None:
         try:
-            # text_classification returns a list per input
             res = client.text_classification(inputs=list(inputs), model=repo_id, timeout=timeout)
+            # normalize: ensure list-of-lists
+            if isinstance(res, dict):
+                # some clients might return dict with error
+                raise RuntimeError(f"InferenceClient returned error dict: {res}")
             return res
         except Exception as e:
-            # bubble up readable error
             raise RuntimeError(f"InferenceClient.text_classification failed: {e}") from e
 
     # fallback: direct request to router endpoint (less preferred)
@@ -173,8 +171,16 @@ def call_hf_inference(repo_id: str, text: str, token: Optional[str], timeout: in
 
 # ---------------- Utility helpers ----------------
 def get_top_prediction(scores_list):
-    best = max(scores_list, key=lambda x: x["score"])
-    return best["label"], float(best["score"])
+    # safe handling if scores_list is not as expected
+    if not isinstance(scores_list, list) or len(scores_list) == 0:
+        return ("ERROR", 0.0)
+    try:
+        best = max(scores_list, key=lambda x: float(x.get("score", 0.0)))
+        return best.get("label", "ERROR"), float(best.get("score", 0.0))
+    except Exception:
+        # fallback: try first element
+        e = scores_list[0]
+        return (e.get("label", "ERROR"), float(e.get("score", 0.0)) if isinstance(e, dict) else 0.0)
 
 def normalize_label(lbl: str):
     if isinstance(lbl, str) and lbl.startswith("LABEL_"):
@@ -289,7 +295,7 @@ if mode == "Single Text":
                     st.code(tb)
                     st.stop()
 
-                scores = out  # list of dicts
+                scores = out  # expected list of dicts
                 top_label, top_score = get_top_prediction(scores)
                 display_label = normalize_label(top_label)
 
@@ -299,7 +305,7 @@ if mode == "Single Text":
             st.metric(label="Predicted class", value=f"{display_label}", delta=f"{top_score:.4f}")
             st.caption("Probabilitas di metric adalah probabilitas kelas terpilih.")
 
-            df = pd.DataFrame([{ "label": normalize_label(x["label"]), "score": x["score"] } for x in scores])
+            df = pd.DataFrame([{ "label": normalize_label(x.get("label")), "score": x.get("score", 0.0) } for x in (scores or [])])
             df = df.sort_values("score", ascending=False).reset_index(drop=True)
             st.markdown("indobert-online-gambling-detection")
             st.bar_chart(df.set_index("label"))
@@ -362,6 +368,7 @@ else:
                                 except Exception:
                                     outs.append([{"label":"ERROR","score":0.0}])
 
+                        # outs is expected list-of-lists (one per input)
                         for out in outs:
                             if isinstance(out, list) and out:
                                 label, conf = get_top_prediction(out)
@@ -398,7 +405,7 @@ else:
                     mapped_labels = [label_mapping.get(x, f"Label {x}") for x in counts.index]
 
                     st.markdown("### 📊 Distribusi Kelas (Komentar)")
-                    if _MPL_AVAILABLE:
+                    if _MPL_AVAILABLE and plt is not None:
                         try:
                             fig, ax = plt.subplots()
                             ax.pie(
