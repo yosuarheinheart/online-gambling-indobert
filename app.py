@@ -1,4 +1,4 @@
-# app.py — Streamlit app using Hugging Face Inference API + full preprocessing for inputs (text & YouTube comments)
+# app.py — Streamlit app using Hugging Face InferenceClient + full preprocessing
 import os
 import re
 import html
@@ -11,14 +11,15 @@ import streamlit as st
 import pandas as pd
 import requests
 
+# matplotlib lazy import + fallback flag
 try:
-    import matplotlib
     import matplotlib.pyplot as plt
     _MPL_AVAILABLE = True
 except Exception:
     plt = None
     _MPL_AVAILABLE = False
 
+# optional Sastrawi
 try:
     from Sastrawi.StopWordRemover.StopWordRemoverFactory import StopWordRemoverFactory
     from Sastrawi.Stemmer.StemmerFactory import StemmerFactory
@@ -26,9 +27,14 @@ try:
 except Exception:
     _SASTRAWI_AVAILABLE = False
 
+# huggingface InferenceClient
+from huggingface_hub import InferenceClient
+
 # ---------------- Config ----------------
 DEFAULT_REPO = "yossss90/indobert_imbalance_1"  # ganti sesuai repo HF Anda
 st.set_page_config(page_title="IndoBERT Classifier (HF API)", layout="centered", initial_sidebar_state="expanded")
+
+# Debug info (temporary) — hapus setelah selesai
 import sys, pkgutil
 st.sidebar.markdown("*Debug info (temporary)*")
 st.sidebar.write("Python:", sys.version.splitlines()[0])
@@ -36,11 +42,11 @@ installed = sorted([m.name for m in pkgutil.iter_modules()])
 st.sidebar.write("matplotlib present:", "matplotlib" in installed)
 st.sidebar.write("sample installed pkgs:", ", ".join(installed[:25]))
 
-# ---------------- Preprocessing utilities (same as your original) ----------------
+# ---------------- Preprocessing utilities ----------------
 FULL_UNICODE_NORMALIZATION_MAP = {
     'Ａ':'A','Ｂ':'B','Ｃ':'C','Ｄ':'D','Ｅ':'E','Ｆ':'F','Ｇ':'G','Ｈ':'H','Ｉ':'I','Ｊ':'J','Ｋ':'K','Ｌ':'L','Ｍ':'M','Ｎ':'N','Ｏ':'O','Ｐ':'P','Ｑ':'Q','Ｒ':'R','Ｓ':'S','Ｔ':'T','Ｕ':'U','Ｖ':'V','Ｗ':'W','Ｘ':'X','Ｙ':'Y','Ｚ':'Z',
     'ａ':'a','ｂ':'b','ｃ':'c','ｄ':'d','ｅ':'e','ｆ':'f','ｇ':'g','ｈ':'h','ｉ':'i','ｊ':'j','ｋ':'k','ｌ':'l','ｍ':'m','ｎ':'n','ｏ':'o','ｐ':'p','𝟎':'0','𝟏':'1','𝟐':'2',
-    # (NOTE) -- paste the complete mapping you had here in production
+    # paste lengkap jika Anda punya mapping lebih besar
 }
 
 MULTI_CHAR_NORMALIZATION_MAP = {
@@ -49,42 +55,25 @@ MULTI_CHAR_NORMALIZATION_MAP = {
 }
 
 def normalize_and_clean_styles(text: str) -> str:
-    # multi-char mapping
     for old, new in MULTI_CHAR_NORMALIZATION_MAP.items():
         text = text.replace(old, new)
-
-    # strip combining diacritics / zero-width / variation selectors
     diacritic_stripper = re.compile(r"[\u0300-\u036f\u0483-\u0489\u200b-\u200f\u20d0-\u20ff\ufe0e\ufe0f]")
     text = diacritic_stripper.sub('', text)
-
-    # map characters via translation table
     trans_table = str.maketrans(FULL_UNICODE_NORMALIZATION_MAP)
     text = text.translate(trans_table)
     return text
 
 def clean_text_modified(text: str) -> str:
     text = str(text)
-
-    # remove anchor tags content
     text = re.sub(r'<a[^>]*>.*?</a>', ' ', text, flags=re.IGNORECASE | re.DOTALL)
-    # remove any html tag
     text = re.sub(r'<[^>]+>', ' ', text)
-    # remove urls (including something.tld/...)
     url_pattern = re.compile(r'(?:https?://|www\.)\S+|[a-zA-Z0-9-]+\.[a-zA-Z]{2,}(?:\/\S*)?')
     text = url_pattern.sub(' ', text)
-
-    # normalize fancy unicode characters
     text = normalize_and_clean_styles(text)
-
-    # unescape HTML entities
     text = html.unescape(text)
-
-    # remove punctuation except keep hyphen '-'
     punc_to_remove = string.punctuation.replace('-', '')
     pattern = r'[' + re.escape(punc_to_remove) + r']'
     text = re.sub(pattern, ' ', text)
-
-    # collapse whitespace
     text = re.sub(r'\s+', ' ', text).strip()
     return text
 
@@ -100,7 +89,6 @@ def safe_stemmer(text: str, stemmer) -> str:
             new_tokens.append(token)
     return " ".join(new_tokens)
 
-# create sastrawi objects if available
 if _SASTRAWI_AVAILABLE:
     try:
         stop_factory = StopWordRemoverFactory()
@@ -115,44 +103,59 @@ else:
     stemmer = None
 
 def preprocess_text_full(text: str) -> str:
-    # 1) clean & normalize unicode / html / urls / punctuation
     t = clean_text_modified(text)
-    # 2) lowercase
     t = t.lower()
-    # 3) stopword remove (if available)
     if stop_remover is not None:
         try:
             t = stop_remover.remove(t)
         except Exception:
             pass
-    # 4) safe stem
     if stemmer is not None:
         try:
             t = safe_stemmer(t, stemmer)
         except Exception:
             pass
-    # final whitespace collapse
     t = re.sub(r'\s+', ' ', t).strip()
     return t
 
-# ---------------- HF Inference API wrapper (replaces local model/pipeline) ----------------
+# ---------------- HF InferenceClient wrapper ----------------
+@st.cache_resource
+def _init_hf_client(token: Optional[str]):
+    if not token:
+        return None
+    try:
+        return InferenceClient(token=token)
+    except Exception as e:
+        print("Warning: Failed to init InferenceClient:", e)
+        return None
+
 def call_hf_inference_batch(repo_id: str, inputs: Iterable[str], token: Optional[str], timeout: int = 60):
     """
-    Call Hugging Face Inference API with a batch (list) of input strings.
-    Returns: list of outputs per input (each output is list of {label, score})
+    Use huggingface_hub.InferenceClient for robust routing (router.huggingface.co).
+    Returns list-of-lists: one output list per input (each output is list of {label, score}).
     Raises RuntimeError on failure.
     """
-    api_url = f"https://api-inference.huggingface.co/models/{repo_id}"
+    client = _init_hf_client(token)
+    # prefer using client if available
+    if client is not None:
+        try:
+            # text_classification returns a list per input
+            res = client.text_classification(inputs=list(inputs), model=repo_id, timeout=timeout)
+            return res
+        except Exception as e:
+            # bubble up readable error
+            raise RuntimeError(f"InferenceClient.text_classification failed: {e}") from e
+
+    # fallback: direct request to router endpoint (less preferred)
+    api_url = f"https://router.huggingface.co/hf-inference/models/{repo_id}"
     headers = {}
     if token:
         headers["Authorization"] = f"Bearer {token}"
-    # HF accepts a list of inputs for batch inference
     try:
         resp = requests.post(api_url, headers=headers, json={"inputs": list(inputs)}, timeout=timeout)
     except Exception as e:
         raise RuntimeError(f"Request failed: {e}")
     if resp.status_code != 200:
-        # try to extract message
         try:
             body = resp.json()
         except Exception:
@@ -165,7 +168,6 @@ def call_hf_inference_batch(repo_id: str, inputs: Iterable[str], token: Optional
 
 def call_hf_inference(repo_id: str, text: str, token: Optional[str], timeout: int = 60):
     out = call_hf_inference_batch(repo_id, [text], token, timeout=timeout)
-    # out expected: [ [ {label, score}, ... ] ]
     if isinstance(out, list) and len(out) > 0:
         return out[0]
     return out
@@ -258,13 +260,10 @@ except Exception:
 # Quick check: ensure we have repo and optionally token
 with st.spinner("Memeriksa akses ke Hugging Face..."):
     try:
-        # We do not perform heavy verification; just attempt a small ping inference with a short input
         test_out = call_hf_inference(repo_input, "test", hf_token, timeout=10)
-        # If no exception, OK
         st.success("Hugging Face model reachable (via Inference API).")
     except Exception as e:
         st.warning(f"Warning: Tidak dapat memverifikasi repo/token lewat API. Error singkat: {e}. Aplikasi akan tetap mencoba saat inference.")
-        # not fatal here — will show runtime errors later if calls fail
 
 # choose input mode
 if example_btn:
@@ -274,7 +273,7 @@ else:
 
 mode = st.radio("Pilih mode input:", ["Single Text", "YouTube URL (comments)"])
 
-# ---------------- Text single mode (with preprocessing) ----------------
+# ---------------- Text single mode ----------------
 if mode == "Single Text":
     text = st.text_area("Masukkan teks untuk diklasifikasi", value=default_text, height=140)
     if st.button("Analyze Text"):
@@ -310,7 +309,7 @@ if mode == "Single Text":
                 st.markdown("#### Raw scores")
                 st.json(scores)
 
-# ---------------- YouTube comments mode (with preprocessing) ----------------
+# ---------------- YouTube comments mode ----------------
 else:
     youtube_url = st.text_input("Enter YouTube link or directly video id:", value="")
     max_comments = st.slider("Maximum number of comments", min_value=10, max_value=1000, value=200, step=10)
@@ -340,7 +339,7 @@ else:
                     st.warning("Tidak ada komentar yang berhasil diambil (atau komentar dinonaktifkan).")
                 else:
                     st.success(f"Fetched  {len(comments)} comments — running preprocessing & inference via HF API...")
-                    batch_size = 32  # chunk size for HF API calls
+                    batch_size = 32  # tune this if you get rate limits or timeouts
                     preds = []
                     confidences = []
                     texts = []
@@ -352,11 +351,10 @@ else:
                         batch = comments[i:i+batch_size]
                         pre_batch = [preprocess_text_full(c) for c in batch]
 
-                        # call HF in batches (to avoid huge payloads)
                         try:
                             outs = call_hf_inference_batch(repo_input, pre_batch, hf_token, timeout=120)
                         except Exception as e:
-                            # fallback: try single-call per item (slower) to get partial results
+                            # fallback: try single-call per item (slower)
                             outs = []
                             for pb in pre_batch:
                                 try:
@@ -365,7 +363,6 @@ else:
                                 except Exception:
                                     outs.append([{"label":"ERROR","score":0.0}])
 
-                        # outs is list-per-input
                         for out in outs:
                             if isinstance(out, list) and out:
                                 label, conf = get_top_prediction(out)
@@ -402,15 +399,23 @@ else:
                     mapped_labels = [label_mapping.get(x, f"Label {x}") for x in counts.index]
 
                     st.markdown("### 📊 Distribusi Kelas (Komentar)")
-                    fig, ax = plt.subplots()
-                    ax.pie(
-                        counts.values,
-                        labels=mapped_labels,
-                        autopct='%1.1f%%',
-                        startangle=90
-                    )
-                    ax.axis('equal')
-                    st.pyplot(fig)
+                    if _MPL_AVAILABLE:
+                        try:
+                            fig, ax = plt.subplots()
+                            ax.pie(
+                                counts.values,
+                                labels=mapped_labels,
+                                autopct='%1.1f%%',
+                                startangle=90
+                            )
+                            ax.axis('equal')
+                            st.pyplot(fig)
+                        except Exception as e:
+                            st.warning(f"matplotlib error: {e}. Using fallback bar chart.")
+                            st.bar_chart(pd.DataFrame({"label": mapped_labels, "count": counts.values}).set_index("label"))
+                    else:
+                        st.warning("matplotlib tidak tersedia — menampilkan bar chart sebagai fallback.")
+                        st.bar_chart(pd.DataFrame({"label": mapped_labels, "count": counts.values}).set_index("label"))
 
                     st.markdown("### 🔎 Results Table")
                     st.dataframe(df_res.head(200))
@@ -427,14 +432,3 @@ st.markdown("---")
 st.write("Notes:")
 st.write("- Preprocessing applied: unicode normalization, HTML/url removal, punctuation cleanup, lowercasing, optional stopword removal & stemming (Sastrawi if installed).")
 st.caption("Developed with ❤️ by Group 4")
-
-# debug-info (sementara - hapus setelah selesai)
-import sys, pkgutil
-import streamlit as st
-st.sidebar.markdown("*Debug info (temp)*")
-st.sidebar.write("Python:", sys.version)
-installed = sorted([m.name for m in pkgutil.iter_modules()])
-# tampilkan apakah matplotlib ada
-st.sidebar.write("matplotlib present:", "matplotlib" in installed)
-# optional: show top 30 installed packages
-st.sidebar.write("Installed pkgs sample:", installed[:30])

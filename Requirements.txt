@@ -7,3 +7,4 @@ pandas
 requests
 requests
 sastrawi
+matplotlib
